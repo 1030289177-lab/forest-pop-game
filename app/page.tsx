@@ -7,6 +7,7 @@ const TYPES = ["berry", "lemon", "leaf", "grape", "peach", "drop"] as const;
 type GemType = (typeof TYPES)[number];
 type Special = "line" | "rainbow";
 type Gem = { id: number; type: GemType; special?: Special };
+type DragState = { index: number; x: number; y: number; pointerId: number };
 const ICONS: Record<GemType, string> = { berry: "●", lemon: "◆", leaf: "♠", grape: "✦", peach: "♥", drop: "⬟" };
 const LABELS: Record<GemType, string> = { berry: "莓果", lemon: "柠檬", leaf: "叶子", grape: "葡萄", peach: "蜜桃", drop: "露珠" };
 let nextId = 1;
@@ -78,25 +79,45 @@ export default function Home() {
   const [status, setStatus] = useState<"playing" | "won" | "lost">("playing");
   const [muted, setMuted] = useState(false);
   const [best, setBest] = useState(0);
+  const [dragging, setDragging] = useState<number | null>(null);
   const busy = useRef(false);
   const scoreRef = useRef(0);
   const movesRef = useRef(24);
+  const audioRef = useRef<AudioContext | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  const suppressClick = useRef(false);
 
   useEffect(() => setBest(Number(localStorage.getItem("forest-pop-best") || 0)), []);
 
-  const sound = (frequency: number, duration = 0.08) => {
-    if (muted) return;
+  const ensureAudio = () => {
     try {
-      const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const ctx = new AudioContextClass();
-      const osc = ctx.createOscillator(), gain = ctx.createGain();
-      osc.frequency.value = frequency;
-      gain.gain.setValueAtTime(0.07, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
-      osc.connect(gain); gain.connect(ctx.destination); osc.start(); osc.stop(ctx.currentTime + duration);
-    } catch { /* audio is optional */ }
+      const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextClass) return null;
+      if (!audioRef.current || audioRef.current.state === "closed") audioRef.current = new AudioContextClass();
+      const ctx = audioRef.current;
+      if (ctx.state === "suspended") void ctx.resume();
+      return ctx;
+    } catch {
+      return null;
+    }
   };
 
+  const sound = (frequency: number, duration = 0.08) => {
+    if (muted) return;
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    const play = () => {
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(frequency, ctx.currentTime);
+      gain.gain.setValueAtTime(0.09, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(); osc.stop(ctx.currentTime + duration);
+    };
+    if (ctx.state === "running") play();
+    else void ctx.resume().then(play).catch(() => undefined);
+  };
   const finish = (finalScore: number, remaining: number) => {
     if (finalScore >= 3200) { setStatus("won"); setMessage("森林重新亮起来了！"); sound(720, 0.35); }
     else if (remaining <= 0) { setStatus("lost"); setMessage("差一点！再来一局吧"); }
@@ -139,15 +160,13 @@ export default function Home() {
     finish(finalScore, movesRef.current);
   };
 
-  const choose = async (index: number) => {
-    if (busy.current || status !== "playing") return;
-    if (selected === null) { setSelected(index); sound(220, 0.04); return; }
-    if (selected === index) { setSelected(null); return; }
-    if (!adjacent(selected, index)) { setSelected(index); return; }
+  const attemptSwap = async (from: number, to: number) => {
+    if (busy.current || status !== "playing" || !adjacent(from, to)) return;
     busy.current = true;
+    setSelected(null);
     const swapped = [...board];
-    [swapped[selected], swapped[index]] = [swapped[index], swapped[selected]];
-    setBoard(swapped); setSelected(null); await wait(170);
+    [swapped[from], swapped[to]] = [swapped[to], swapped[from]];
+    setBoard(swapped); sound(250, 0.05); await wait(170);
     if (!groups(swapped).length) {
       setMessage("这一步还不能消除，换个方向试试"); sound(120, 0.12);
       setBoard(board); await wait(180); busy.current = false; return;
@@ -157,6 +176,48 @@ export default function Home() {
     await resolveBoard(swapped); busy.current = false;
   };
 
+  const choose = async (index: number) => {
+    if (busy.current || status !== "playing") return;
+    ensureAudio();
+    if (selected === null) { setSelected(index); sound(220, 0.04); return; }
+    if (selected === index) { setSelected(null); return; }
+    if (!adjacent(selected, index)) { setSelected(index); sound(220, 0.04); return; }
+    await attemptSwap(selected, index);
+  };
+
+  const startDrag = (index: number, event: React.PointerEvent<HTMLButtonElement>) => {
+    if (busy.current || status !== "playing") return;
+    ensureAudio();
+    dragRef.current = { index, x: event.clientX, y: event.clientY, pointerId: event.pointerId };
+    setDragging(index);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const endDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    setDragging(null);
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - drag.x, dy = event.clientY - drag.y;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 18) return;
+    suppressClick.current = true;
+    const row = Math.floor(drag.index / SIZE), col = drag.index % SIZE;
+    let target = drag.index;
+    if (Math.abs(dx) > Math.abs(dy)) {
+      if (dx > 0 && col < SIZE - 1) target++;
+      else if (dx < 0 && col > 0) target--;
+    } else {
+      if (dy > 0 && row < SIZE - 1) target += SIZE;
+      else if (dy < 0 && row > 0) target -= SIZE;
+    }
+    if (target !== drag.index) void attemptSwap(drag.index, target);
+    else sound(120, 0.08);
+  };
+
+  const cancelDrag = () => {
+    dragRef.current = null;
+    setDragging(null);
+  };
   const restart = () => {
     scoreRef.current = 0; movesRef.current = 24; busy.current = false;
     setBoard(makeBoard()); setScore(0); setMoves(24); setSelected(null); setCombo(0);
@@ -169,7 +230,7 @@ export default function Home() {
       <div className="forest-glow glow-one" /><div className="forest-glow glow-two" />
       <header className="topbar">
         <div className="brand"><span className="brand-mark">✦</span><div><h1>森灵消消乐</h1><p>FOREST POP</p></div></div>
-        <div className="top-actions"><span className="best">最佳 {best.toLocaleString()}</span><button className="icon-button" onClick={() => setMuted(!muted)} aria-label={muted ? "打开声音" : "关闭声音"}>{muted ? "♩" : "♪"}</button></div>
+        <div className="top-actions"><span className="best">最佳 {best.toLocaleString()}</span><button className="icon-button" onClick={() => { const next = !muted; setMuted(next); if (!next) ensureAudio(); }} aria-label={muted ? "打开声音" : "关闭声音"}>{muted ? "♩" : "♪"}</button></div>
       </header>
       <section className="game-layout">
         <aside className="mission-card">
@@ -183,7 +244,7 @@ export default function Home() {
           <div className="board-head"><div><span className="eyebrow">森林深处</span><h2>{message}</h2></div><div className="moves"><b>{moves}</b><span>剩余步数</span></div></div>
           <div className={`board ${combo > 1 ? "board-combo" : ""}`} role="grid" aria-label="三消游戏棋盘">
             {board.map((item, index) => (
-              <button key={item.id} role="gridcell" className={`tile ${selected === index ? "selected" : ""}`} onClick={() => choose(index)} aria-label={`${LABELS[item.type]}${item.special ? "，特殊精灵" : ""}`}>
+              <button key={item.id} role="gridcell" className={`tile ${selected === index ? "selected" : ""} ${dragging === index ? "dragging" : ""}`} onPointerDown={(event) => startDrag(index, event)} onPointerUp={endDrag} onPointerCancel={cancelDrag} onClick={() => { if (suppressClick.current) { suppressClick.current = false; return; } void choose(index); }} aria-label={`${LABELS[item.type]}${item.special ? "，特殊精灵" : ""}`}>
                 <span className={`gem gem-${item.type} ${item.special ? `special-${item.special}` : ""}`}><i>{ICONS[item.type]}</i>{item.special && <em>✦</em>}</span>
               </button>
             ))}
@@ -192,7 +253,7 @@ export default function Home() {
         </div>
       </section>
       {status !== "playing" && <div className="modal-backdrop"><div className="result-card"><span className="result-spark">✦</span><p>{status === "won" ? "关卡完成" : "本局结束"}</p><h2>{status === "won" ? "森林醒来了！" : "再试一次吧"}</h2><strong>{score.toLocaleString()} 分</strong><button onClick={restart}>再玩一局</button></div></div>}
-      <footer>原创三消游戏 · 点击两个相邻精灵进行交换</footer>
+      <footer>原创三消游戏 · 点击或拖动相邻精灵进行交换</footer>
     </main>
   );
 }

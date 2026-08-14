@@ -34,6 +34,8 @@ test("contains playable match-three logic and deploy metadata", async () => {
   assert.match(page, /function groups/);
   assert.match(page, /function collapse/);
   assert.match(page, /localStorage\.setItem/);
+  assert.match(page, /onPointerDown/);
+  assert.match(page, /audioRef/);
   assert.match(layout, /og\.png/);
   assert.match(css, /@media\(max-width:520px\)/);
   assert.match(renderConfig, /runtime: node/);
