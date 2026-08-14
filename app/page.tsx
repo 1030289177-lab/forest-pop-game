@@ -10,6 +10,13 @@ type Gem = { id: number; type: GemType; special?: Special };
 type DragState = { index: number; x: number; y: number; pointerId: number };
 const ICONS: Record<GemType, string> = { berry: "●", lemon: "◆", leaf: "♠", grape: "✦", peach: "♥", drop: "⬟" };
 const LABELS: Record<GemType, string> = { berry: "莓果", lemon: "柠檬", leaf: "叶子", grape: "葡萄", peach: "蜜桃", drop: "露珠" };
+const LEVELS = [
+  { name: "唤醒萤光林", description: "收集森林能量，让沉睡的古树重新发光。", target: 3200, moves: 24 },
+  { name: "穿越苔藓谷", description: "沿着湿润的苔藓小径，寻找远古的萤光。", target: 4800, moves: 25 },
+  { name: "点亮星露湖", description: "让连击化作星光，照亮静谧的湖面。", target: 6800, moves: 27 },
+  { name: "守护古树心", description: "汇聚精灵之力，守住森林的生命核心。", target: 9200, moves: 29 },
+  { name: "盛放月光花", description: "完成最终试炼，让月光花开满森林。", target: 12000, moves: 30 },
+] as const;
 let nextId = 1;
 const gem = (type = TYPES[Math.floor(Math.random() * TYPES.length)]): Gem => ({ id: nextId++, type });
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -70,10 +77,11 @@ function collapse(board: (Gem | null)[]) {
 }
 
 export default function Home() {
+  const [levelIndex, setLevelIndex] = useState(0);
   const [board, setBoard] = useState<Gem[]>(() => makeBoard());
   const [selected, setSelected] = useState<number | null>(null);
   const [score, setScore] = useState(0);
-  const [moves, setMoves] = useState(24);
+  const [moves, setMoves] = useState(LEVELS[0].moves);
   const [combo, setCombo] = useState(0);
   const [message, setMessage] = useState("交换相邻精灵，连成 3 个或更多");
   const [status, setStatus] = useState<"playing" | "won" | "lost">("playing");
@@ -82,10 +90,12 @@ export default function Home() {
   const [dragging, setDragging] = useState<number | null>(null);
   const busy = useRef(false);
   const scoreRef = useRef(0);
-  const movesRef = useRef(24);
+  const movesRef = useRef(LEVELS[0].moves);
   const audioRef = useRef<AudioContext | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const suppressClick = useRef(false);
+
+  const level = LEVELS[levelIndex];
 
   useEffect(() => setBest(Number(localStorage.getItem("forest-pop-best") || 0)), []);
 
@@ -119,7 +129,10 @@ export default function Home() {
     else void ctx.resume().then(play).catch(() => undefined);
   };
   const finish = (finalScore: number, remaining: number) => {
-    if (finalScore >= 3200) { setStatus("won"); setMessage("森林重新亮起来了！"); sound(720, 0.35); }
+    if (finalScore >= level.target) {
+      setStatus("won"); setMessage(level.name + "完成！"); sound(720, 0.35);
+      localStorage.setItem("forest-pop-unlocked", String(Math.min(LEVELS.length, levelIndex + 2)));
+    }
     else if (remaining <= 0) { setStatus("lost"); setMessage("差一点！再来一局吧"); }
     if (finalScore > best) { setBest(finalScore); localStorage.setItem("forest-pop-best", String(finalScore)); }
   };
@@ -185,31 +198,50 @@ export default function Home() {
     await attemptSwap(selected, index);
   };
 
+  const dragTarget = (drag: DragState, x: number, y: number) => {
+    const dx = x - drag.x, dy = y - drag.y;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 12) return null;
+    const row = Math.floor(drag.index / SIZE), col = drag.index % SIZE;
+    if (Math.abs(dx) > Math.abs(dy)) {
+      if (dx > 0 && col < SIZE - 1) return drag.index + 1;
+      if (dx < 0 && col > 0) return drag.index - 1;
+    } else {
+      if (dy > 0 && row < SIZE - 1) return drag.index + SIZE;
+      if (dy < 0 && row > 0) return drag.index - SIZE;
+    }
+    return drag.index;
+  };
+
   const startDrag = (index: number, event: React.PointerEvent<HTMLButtonElement>) => {
     if (busy.current || status !== "playing") return;
+    event.preventDefault();
     ensureAudio();
     dragRef.current = { index, x: event.clientX, y: event.clientY, pointerId: event.pointerId };
     setDragging(index);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
-  const endDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+  const moveDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
     const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const target = dragTarget(drag, event.clientX, event.clientY);
+    if (target === null) return;
     dragRef.current = null;
     setDragging(null);
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const dx = event.clientX - drag.x, dy = event.clientY - drag.y;
-    if (Math.max(Math.abs(dx), Math.abs(dy)) < 18) return;
     suppressClick.current = true;
-    const row = Math.floor(drag.index / SIZE), col = drag.index % SIZE;
-    let target = drag.index;
-    if (Math.abs(dx) > Math.abs(dy)) {
-      if (dx > 0 && col < SIZE - 1) target++;
-      else if (dx < 0 && col > 0) target--;
-    } else {
-      if (dy > 0 && row < SIZE - 1) target += SIZE;
-      else if (dy < 0 && row > 0) target -= SIZE;
-    }
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (target !== drag.index) void attemptSwap(drag.index, target);
+    else sound(120, 0.08);
+  };
+
+  const endDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const target = dragTarget(drag, event.clientX, event.clientY);
+    dragRef.current = null;
+    setDragging(null);
+    if (target === null) return;
+    suppressClick.current = true;
     if (target !== drag.index) void attemptSwap(drag.index, target);
     else sound(120, 0.08);
   };
@@ -218,13 +250,17 @@ export default function Home() {
     dragRef.current = null;
     setDragging(null);
   };
-  const restart = () => {
-    scoreRef.current = 0; movesRef.current = 24; busy.current = false;
-    setBoard(makeBoard()); setScore(0); setMoves(24); setSelected(null); setCombo(0);
-    setStatus("playing"); setMessage("新的一局，点亮整片森林吧！");
+  const startLevel = (index: number) => {
+    const next = LEVELS[index];
+    scoreRef.current = 0; movesRef.current = next.moves; busy.current = false;
+    setLevelIndex(index); setBoard(makeBoard()); setScore(0); setMoves(next.moves);
+    setSelected(null); setDragging(null); setCombo(0); setStatus("playing");
+    setMessage("第 " + (index + 1) + " 关 · " + next.name);
   };
 
-  const progress = Math.min(100, (score / 3200) * 100);
+  const restart = () => startLevel(levelIndex);
+  const nextLevel = () => startLevel(levelIndex < LEVELS.length - 1 ? levelIndex + 1 : 0);
+  const progress = Math.min(100, (score / level.target) * 100);
   return (
     <main className="game-shell">
       <div className="forest-glow glow-one" /><div className="forest-glow glow-two" />
@@ -234,17 +270,18 @@ export default function Home() {
       </header>
       <section className="game-layout">
         <aside className="mission-card">
-          <div className="chapter">第 1 关</div><h2>唤醒萤光林</h2><p>收集森林能量，让沉睡的古树重新发光。</p>
-          <div className="goal-row"><span>目标分数</span><strong>3,200</strong></div>
+          <div className="chapter">第 {levelIndex + 1} 关 · 共 {LEVELS.length} 关</div><h2>{level.name}</h2><p>{level.description}</p>
+          <div className="goal-row"><span>目标分数</span><strong>{level.target.toLocaleString()}</strong></div>
           <div className="progress-track"><i style={{ width: `${progress}%` }} /></div>
           <div className="score-display"><small>当前分数</small><b>{score.toLocaleString()}</b></div>
+          <div className="level-pips" aria-label={"第 " + (levelIndex + 1) + " 关，共 " + LEVELS.length + " 关"}>{LEVELS.map((_, i) => <i key={i} className={i <= levelIndex ? "active" : ""} />)}</div>
           <div className="tip"><span>✦</span><p><strong>连击秘诀</strong><br />一次连成 4 个会生成十字萤光，5 个则生成彩虹萤光。</p></div>
         </aside>
         <div className="board-wrap">
           <div className="board-head"><div><span className="eyebrow">森林深处</span><h2>{message}</h2></div><div className="moves"><b>{moves}</b><span>剩余步数</span></div></div>
           <div className={`board ${combo > 1 ? "board-combo" : ""}`} role="grid" aria-label="三消游戏棋盘">
             {board.map((item, index) => (
-              <button key={item.id} role="gridcell" className={`tile ${selected === index ? "selected" : ""} ${dragging === index ? "dragging" : ""}`} onPointerDown={(event) => startDrag(index, event)} onPointerUp={endDrag} onPointerCancel={cancelDrag} onClick={() => { if (suppressClick.current) { suppressClick.current = false; return; } void choose(index); }} aria-label={`${LABELS[item.type]}${item.special ? "，特殊精灵" : ""}`}>
+              <button key={item.id} role="gridcell" className={`tile ${selected === index ? "selected" : ""} ${dragging === index ? "dragging" : ""}`} onPointerDown={(event) => startDrag(index, event)} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={cancelDrag} onDragStart={(event) => event.preventDefault()} onClick={() => { if (suppressClick.current) { suppressClick.current = false; return; } void choose(index); }} aria-label={`${LABELS[item.type]}${item.special ? "，特殊精灵" : ""}`}>
                 <span className={`gem gem-${item.type} ${item.special ? `special-${item.special}` : ""}`}><i>{ICONS[item.type]}</i>{item.special && <em>✦</em>}</span>
               </button>
             ))}
@@ -252,7 +289,7 @@ export default function Home() {
           <div className="board-foot"><span><i className="status-dot" /> {status === "playing" ? "关卡进行中" : status === "won" ? "任务完成" : "本局结束"}</span><button onClick={restart}>↻ 重新开始</button></div>
         </div>
       </section>
-      {status !== "playing" && <div className="modal-backdrop"><div className="result-card"><span className="result-spark">✦</span><p>{status === "won" ? "关卡完成" : "本局结束"}</p><h2>{status === "won" ? "森林醒来了！" : "再试一次吧"}</h2><strong>{score.toLocaleString()} 分</strong><button onClick={restart}>再玩一局</button></div></div>}
+      {status !== "playing" && <div className="modal-backdrop"><div className="result-card"><span className="result-spark">✦</span><p>{status === "won" ? "关卡完成" : "本局结束"}</p><h2>{status === "won" ? "森林醒来了！" : "再试一次吧"}</h2><strong>{score.toLocaleString()} 分</strong><button onClick={status === "won" ? nextLevel : restart}>{status === "won" ? (levelIndex < LEVELS.length - 1 ? "下一关" : "重新挑战") : "再玩一局"}</button></div></div>}
       <footer>原创三消游戏 · 点击或拖动相邻精灵进行交换</footer>
     </main>
   );
